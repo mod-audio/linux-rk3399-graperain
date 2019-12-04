@@ -95,7 +95,7 @@ static void enable_cpu_counters(void *data)
 
 static void set_cv_exp_pedal_mode(int mode);
 
-static irq_handler_t exp_flag_irq_handler(unsigned int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t exp_flag_irq_handler(int irq, void *dev_id)
 {
 	printk(KERN_INFO "MOD Devices: Expression Pedal flag IRQ %u triggered! (values are %d %d)\n",
 	       irq,
@@ -279,7 +279,7 @@ static void set_exp_pedal_mode(int mode)
 		{
 			if (modduox_gpios->irqFlag1 <= 0 || modduox_gpios->irqFlag2 <= 0)
 			{
-				printk("MOD Devices: set_exp_pedal_mode(%i) call ignored, as Expression Pedal flag IRQ failed before\n");
+				printk("MOD Devices: set_exp_pedal_mode(%i) call ignored, as Expression Pedal flag IRQ failed before\n", mode);
 			}
 			else if (mode == (int)EXP_PEDAL_SIGNAL_ON_TIP)
 			{
