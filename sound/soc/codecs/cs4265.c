@@ -77,6 +77,7 @@ static struct _modduox_gpios {
 	struct gpio_desc *exp_flag1;
 	struct gpio_desc *exp_flag2;
 	int irqFlag1, irqFlag2;
+	bool initialized;
 } *modduox_gpios;
 
 #ifndef _MOD_RESTORE
@@ -130,6 +131,11 @@ static int modduox_init(struct i2c_client *i2c_client)
 	modduox_gpios->true_bypass_left  = devm_gpiod_get(&i2c_client->dev, "true_bypass_left",  GPIOD_OUT_LOW);
 	modduox_gpios->true_bypass_right = devm_gpiod_get(&i2c_client->dev, "true_bypass_right", GPIOD_OUT_LOW);
 
+	if (IS_ERR(modduox_gpios->headphone_cv_mode) || !modduox_gpios->headphone_cv_mode) {
+		modduox_gpios->initialized = false;
+		return 0;
+	}
+
 	// put headphone volume to lowest setting, so we know where we are
 	gpiod_set_value(modduox_gpios->headphone_dir, 0);
 
@@ -150,6 +156,8 @@ static int modduox_init(struct i2c_client *i2c_client)
 	gpiod_set_value(modduox_gpios->gain_stage_left2, 1);
 	gpiod_set_value(modduox_gpios->gain_stage_right1, 1);
 	gpiod_set_value(modduox_gpios->gain_stage_right2, 1);
+
+	modduox_gpios->initialized = true;
 
 	modduox_gpios->irqFlag1 = gpiod_to_irq(modduox_gpios->exp_flag1);
 	modduox_gpios->irqFlag2 = gpiod_to_irq(modduox_gpios->exp_flag2);
@@ -183,13 +191,15 @@ static void set_headphone_volume(int new_volume)
 	int i;
 	int steps = abs(new_volume - headphone_volume);
 
-	// select volume adjustment direction
-	gpiod_set_value(modduox_gpios->headphone_dir, new_volume > headphone_volume ? 1 : 0);
+	if (modduox_gpios->initialized) {
+		// select volume adjustment direction
+		gpiod_set_value(modduox_gpios->headphone_dir, new_volume > headphone_volume ? 1 : 0);
 
-	for (i=0; i < steps; i++) {
-		// toggle clock in order to sample the volume pin upon clock's rising edge
-		gpiod_set_value(modduox_gpios->headphone_clk, 1);
-		gpiod_set_value(modduox_gpios->headphone_clk, 0);
+		for (i=0; i < steps; i++) {
+			// toggle clock in order to sample the volume pin upon clock's rising edge
+			gpiod_set_value(modduox_gpios->headphone_clk, 1);
+			gpiod_set_value(modduox_gpios->headphone_clk, 0);
+		}
 	}
 
 	headphone_volume = new_volume;
@@ -213,6 +223,9 @@ static void set_gain_stage(int channel, int state)
 	default:
 		return;
 	}
+
+	if (!modduox_gpios->initialized)
+		return;
 
 	switch (state) {
 	case 0:
@@ -245,11 +258,13 @@ static void set_true_bypass(int channel, bool state)
 {
 	switch (channel) {
 	case CHANNEL_LEFT:
-		gpiod_set_value(modduox_gpios->true_bypass_left, state ? GPIO_BYPASS : GPIO_PROCESS);
+		if (modduox_gpios->initialized)
+			gpiod_set_value(modduox_gpios->true_bypass_left, state ? GPIO_BYPASS : GPIO_PROCESS);
 		left_true_bypass = state;
 		break;
 	case CHANNEL_RIGHT:
-		gpiod_set_value(modduox_gpios->true_bypass_right, state ? GPIO_BYPASS : GPIO_PROCESS);
+		if (modduox_gpios->initialized)
+			gpiod_set_value(modduox_gpios->true_bypass_right, state ? GPIO_BYPASS : GPIO_PROCESS);
 		right_true_bypass = state;
 		break;
 	}
@@ -262,7 +277,8 @@ static void set_headphone_cv_mode(int mode)
 	switch (mode) {
 	case 0:
 	case 1:
-		gpiod_set_value(modduox_gpios->headphone_cv_mode, mode);
+		if (modduox_gpios->initialized)
+			gpiod_set_value(modduox_gpios->headphone_cv_mode, mode);
 		headphone_cv_mode = mode != 0;
 		break;
 	default:
@@ -275,7 +291,7 @@ static void set_exp_pedal_mode(int mode)
 	switch (mode) {
 	case 0:
 	case 1:
-		if (cv_exp_pedal_mode)
+		if (cv_exp_pedal_mode && modduox_gpios->initialized)
 		{
 			if (modduox_gpios->irqFlag1 <= 0 || modduox_gpios->irqFlag2 <= 0)
 			{
@@ -303,16 +319,18 @@ static void set_cv_exp_pedal_mode(int mode)
 {
 	switch (mode) {
 	case 0: // cv mode
-		gpiod_set_value(modduox_gpios->exp_enable1, 0);
-		gpiod_set_value(modduox_gpios->exp_enable2, 0);
-		gpiod_set_value(modduox_gpios->cv_in_bias, cv_range_mode);
+		if (modduox_gpios->initialized) {
+			gpiod_set_value(modduox_gpios->exp_enable1, 0);
+			gpiod_set_value(modduox_gpios->exp_enable2, 0);
+			gpiod_set_value(modduox_gpios->cv_in_bias, cv_range_mode);
+		}
 		cv_exp_pedal_mode = false;
 		break;
 
 	case 1: // exp.pedal mode
 		// disable this first
-		gpiod_set_value(modduox_gpios->cv_in_bias, CV_RANGE_MODE_0_to_5);
-
+		if (modduox_gpios->initialized)
+			gpiod_set_value(modduox_gpios->cv_in_bias, CV_RANGE_MODE_0_to_5);
 		// safe to set now
 		cv_exp_pedal_mode = true;
 		set_exp_pedal_mode(exp_pedal_mode);
@@ -328,10 +346,8 @@ static void set_range_mode(int mode)
 	switch (mode) {
 	case 0:
 	case 1:
-		if (!cv_exp_pedal_mode)
-		{
+		if (!cv_exp_pedal_mode && modduox_gpios->initialized)
 			gpiod_set_value(modduox_gpios->cv_in_bias, mode);
-		}
 		cv_range_mode = mode != 0;
 		break;
 	default:
