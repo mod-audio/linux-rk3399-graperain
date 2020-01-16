@@ -44,9 +44,6 @@
 #define GPIO_BYPASS     0
 #define GPIO_PROCESS    1
 
-#define CV_RANGE_MODE_0_to_5      false
-#define CV_RANGE_MODE_m2d5_to_2d5 true
-
 // tip means enable2, ring enable1
 #define EXP_PEDAL_SIGNAL_ON_TIP  false
 #define EXP_PEDAL_SIGNAL_ON_RING true
@@ -58,7 +55,6 @@ static bool left_true_bypass = true;
 static bool right_true_bypass = true;
 static bool headphone_cv_mode = false; // true means CV mode, false is headphone (CV output mode)
 static bool cv_exp_pedal_mode = false; // true means expression pedal mode, false is CV mode (CV input mode)
-static bool cv_range_mode = CV_RANGE_MODE_0_to_5;
 static bool exp_pedal_mode = EXP_PEDAL_SIGNAL_ON_TIP;
 
 static struct _modduox_gpios {
@@ -73,26 +69,11 @@ static struct _modduox_gpios {
 	struct gpio_desc *true_bypass_right;
 	struct gpio_desc *exp_enable1;
 	struct gpio_desc *exp_enable2;
-	struct gpio_desc *cv_in_bias;
 	struct gpio_desc *exp_flag1;
 	struct gpio_desc *exp_flag2;
 	int irqFlag1, irqFlag2;
 	bool initialized;
 } *modduox_gpios;
-
-#ifndef _MOD_RESTORE
-static void enable_cpu_counters(void *data)
-{
-	printk("MOD Devices: Enabling user-mode PMU access on CPU #%d\n", smp_processor_id());
-
-	/* Enable user-mode access to counters. */
-	asm volatile("msr PMUSERENR_EL0, %0" :: "r"(1));
-	/* Program PMU and enable all counters */
-	asm volatile("msr PMCR_EL0, %0" :: "r"(23)); // 1|2|4|16
-	asm volatile("msr PMCNTENSET_EL0, %0" :: "r"(0x8000000f));
-	asm volatile("msr PMCCFILTR_EL0, %0" :: "r"(0));
-}
-#endif
 
 static void set_cv_exp_pedal_mode(int mode);
 
@@ -123,7 +104,6 @@ static int modduox_init(struct i2c_client *i2c_client)
 	modduox_gpios->gain_stage_right2 = devm_gpiod_get(&i2c_client->dev, "gain_stage_right2", GPIOD_OUT_HIGH);
 	modduox_gpios->exp_enable1       = devm_gpiod_get(&i2c_client->dev, "exp_enable1",       GPIOD_OUT_HIGH);
 	modduox_gpios->exp_enable2       = devm_gpiod_get(&i2c_client->dev, "exp_enable2",       GPIOD_OUT_HIGH);
-	modduox_gpios->cv_in_bias        = devm_gpiod_get(&i2c_client->dev, "cv_in_bias",        GPIOD_OUT_HIGH);
 	modduox_gpios->exp_flag1         = devm_gpiod_get(&i2c_client->dev, "exp_flag1",         GPIOD_IN);
 	modduox_gpios->exp_flag2         = devm_gpiod_get(&i2c_client->dev, "exp_flag2",         GPIOD_IN);
 
@@ -147,7 +127,6 @@ static int modduox_init(struct i2c_client *i2c_client)
 
 	// initialize gpios
 	gpiod_set_value(modduox_gpios->headphone_cv_mode, headphone_cv_mode ? 1 : 0);
-	gpiod_set_value(modduox_gpios->cv_in_bias, cv_range_mode ? 1 : 0);
 	gpiod_set_value(modduox_gpios->exp_enable1, 0);
 	gpiod_set_value(modduox_gpios->exp_enable2, 0);
 
@@ -177,10 +156,6 @@ static int modduox_init(struct i2c_client *i2c_client)
 	else
 		printk("MOD Devices: Expression Pedal flag IRQ failed!\n");
 
-#ifndef _MOD_RESTORE
-	// enable user-mode access to counters
-	on_each_cpu(enable_cpu_counters, NULL, 1);
-#endif
 	return 0;
 }
 
@@ -319,37 +294,18 @@ static void set_cv_exp_pedal_mode(int mode)
 {
 	switch (mode) {
 	case 0: // cv mode
+		cv_exp_pedal_mode = false;
 		if (modduox_gpios->initialized) {
 			gpiod_set_value(modduox_gpios->exp_enable1, 0);
 			gpiod_set_value(modduox_gpios->exp_enable2, 0);
-			gpiod_set_value(modduox_gpios->cv_in_bias, cv_range_mode);
 		}
-		cv_exp_pedal_mode = false;
 		break;
 
 	case 1: // exp.pedal mode
-		// disable this first
-		if (modduox_gpios->initialized)
-			gpiod_set_value(modduox_gpios->cv_in_bias, CV_RANGE_MODE_0_to_5);
-		// safe to set now
 		cv_exp_pedal_mode = true;
 		set_exp_pedal_mode(exp_pedal_mode);
 		break;
 
-	default:
-		break;
-	}
-}
-
-static void set_range_mode(int mode)
-{
-	switch (mode) {
-	case 0:
-	case 1:
-		if (!cv_exp_pedal_mode && modduox_gpios->initialized)
-			gpiod_set_value(modduox_gpios->cv_in_bias, mode);
-		cv_range_mode = mode != 0;
-		break;
 	default:
 		break;
 	}
@@ -517,33 +473,6 @@ static int cv_exp_pedal_mode_put(struct snd_kcontrol *kcontrol, struct snd_ctl_e
 	int changed = 0;
 	if (cv_exp_pedal_mode != ucontrol->value.integer.value[0]) {
 		set_cv_exp_pedal_mode(ucontrol->value.integer.value[0]);
-		changed = 1;
-	}
-	return changed;
-}
-
-//----------------------------------------------------------------------
-
-static int cv_range_info(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_info *uinfo)
-{
-	uinfo->type = SNDRV_CTL_ELEM_TYPE_BOOLEAN;
-	uinfo->count = 1;
-	uinfo->value.integer.min = 0;
-	uinfo->value.integer.max = 1;
-	return 0;
-}
-
-static int cv_range_get(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
-{
-	ucontrol->value.integer.value[0] = cv_range_mode;
-	return 0;
-}
-
-static int cv_range_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
-{
-	int changed = 0;
-	if (cv_range_mode != ucontrol->value.integer.value[0]) {
-		set_range_mode(ucontrol->value.integer.value[0]);
 		changed = 1;
 	}
 	return changed;
@@ -789,15 +718,6 @@ static const struct snd_kcontrol_new cs4265_snd_controls[] = {
 		.info = cv_exp_pedal_mode_info,
 		.get = cv_exp_pedal_mode_get,
 		.put = cv_exp_pedal_mode_put
-	},
-	{
-		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
-		.name = "CV Range",
-		.index = 0,
-		.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,
-		.info = cv_range_info,
-		.get = cv_range_get,
-		.put = cv_range_put
 	},
 	{
 		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
